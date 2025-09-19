@@ -10,10 +10,10 @@ from sklearn.model_selection import train_test_split  # 데이터셋 분할을 �
 from torchvision.transforms import functional as F  # 이미지 리사이징을 위한 torchvision.transforms 임포트
 
 # 논문에서 사용된 하이퍼파라미터 정의
-PATCH_SIZE = (1, 32, 32)
+PATCH_SIZE = (1, 128, 128)
 TIMESTEPS = 1
-HEIGHT = 256
-WIDTH = 256
+HEIGHT = 128
+WIDTH = 128
 CHANNELS = 5
 NUM_ENCODER_LAYERS = 4
 NUM_HEADS = 8
@@ -21,7 +21,7 @@ EMBED_DIM = 512
 MLP_DIM = 2048
 
 
-# ViViT 모델 클래스 (총 수확량을 예측하도록 사용됨)
+# ViViT 모델 클래스 (이전과 동일)
 class ViViT(nn.Module):
     def __init__(self,
                  timesteps=TIMESTEPS,
@@ -65,73 +65,97 @@ class ViViT(nn.Module):
         return x
 
 
-# 사용자 정의 데이터셋 클래스 (총 수확량 데이터를 사용)
+# 사용자 정의 데이터셋 클래스 (이미지를 여러 패치로 잘라 사용)
 class RiceYieldDataset(Dataset):
     def __init__(self, base_dir, filenames, yield_map):
         self.base_dir = base_dir
         self.filenames = filenames
         self.yield_map = yield_map
         self.timesteps = TIMESTEPS
-        self.height = HEIGHT
-        self.width = WIDTH
         self.channels = CHANNELS
+        self.patch_h = PATCH_SIZE[1]
+        self.patch_w = PATCH_SIZE[2]
         self.band_abbreviations = {
-            'Blue': 'Blue',
-            'Green': 'Green',
-            'Red': 'Red',
-            'Red_Edge': 'RE',
-            'NIR': 'NIR'
+            'Blue': 'Blue', 'Green': 'Green', 'Red': 'Red',
+            'Red_Edge': 'RE', 'NIR': 'NIR'
         }
 
+        self.data = []
+        for field_name in filenames:
+            field_path = os.path.join(base_dir, field_name)
+            all_bands_raw = []
+            image_files = [f for f in os.listdir(field_path) if f.endswith('.data.tif')]
+            ordered_bands = ['Blue', 'Green', 'Red', 'Red_Edge', 'NIR']
+
+            # 모든 밴드 파일을 불러와 원본 크기 그대로 리스트에 저장
+            for band_name in ordered_bands:
+                abbreviation = self.band_abbreviations[band_name]
+                found_file = next((f for f in image_files if field_name in f and abbreviation in f), None)
+
+                if found_file:
+                    band_path = os.path.join(field_path, found_file)
+                    try:
+                        with rasterio.open(band_path) as src:
+                            img = src.read(1)
+                            all_bands_raw.append(torch.from_numpy(img).float())
+                    except rasterio.errors.RasterioIOError:
+                        print(f"Error loading {band_path}. Skipping...")
+                        # 오류 발생 시 빈 텐서 대신 None을 추가
+                        all_bands_raw.append(None)
+                else:
+                    print(f"File for field {field_name} and band {band_name} not found. Skipping...")
+                    all_bands_raw.append(None)
+
+            # 불러온 밴드들 중 가장 작은 크기 찾기
+            valid_bands = [b for b in all_bands_raw if b is not None]
+            if not valid_bands:
+                print(f"No valid band data found for field {field_name}. Skipping field.")
+                continue
+
+            min_h = min(b.shape[0] for b in valid_bands)
+            min_w = min(b.shape[1] for b in valid_bands)
+
+            bands_by_channel = []
+            # 모든 밴드를 가장 작은 공통 크기로 크롭하여 합치기
+            for b in all_bands_raw:
+                if b is not None:
+                    # 중앙 크롭하여 크기 맞추기
+                    cropped_band = F.center_crop(b.unsqueeze(0), (min_h, min_w)).squeeze(0)
+                    bands_by_channel.append(cropped_band)
+                else:
+                    # 유효하지 않은 밴드는 가장 작은 크기의 0 텐서로 채움
+                    bands_by_channel.append(torch.zeros((min_h, min_w), dtype=torch.float32))
+
+            full_image_tensor = torch.stack(bands_by_channel, dim=2)
+
+            # 이미지를 패치로 자르기
+            h, w, c = full_image_tensor.shape
+            for i in range(0, h, self.patch_h):
+                for j in range(0, w, self.patch_w):
+                    patch = full_image_tensor[i:i + self.patch_h, j:j + self.patch_w, :]
+
+                    if patch.shape[0] == self.patch_h and patch.shape[1] == self.patch_w:
+                        self.data.append({
+                            'image': patch,
+                            'yield': self.yield_map[field_name]
+                        })
+
     def __len__(self):
-        return len(self.filenames)
+        return len(self.data)
 
     def __getitem__(self, idx):
-        field_name = self.filenames[idx]
-        field_path = os.path.join(self.base_dir, field_name)
+        item = self.data[idx]
+        image_tensor = item['image'].unsqueeze(0)
+        yield_value = torch.tensor(item['yield'], dtype=torch.float32)
 
-        bands_by_channel = []
-        image_files = [f for f in os.listdir(field_path) if f.endswith('.data.tif')]
-        ordered_bands = ['Blue', 'Green', 'Red', 'Red_Edge', 'NIR']
-
-        for band_name in ordered_bands:
-            abbreviation = self.band_abbreviations[band_name]
-            found_file = next((f for f in image_files if field_name in f and abbreviation in f), None)
-
-            if found_file:
-                band_path = os.path.join(field_path, found_file)
-                try:
-                    with rasterio.open(band_path) as src:
-                        img = src.read(1)
-                        img_tensor = torch.from_numpy(img).float().unsqueeze(0)
-                        resized_img_tensor = F.resize(img_tensor, (self.height, self.width))
-                        bands_by_channel.append(resized_img_tensor.squeeze(0))
-                except rasterio.errors.RasterioIOError:
-                    print(f"Error loading {band_path}. Skipping...")
-                    bands_by_channel.append(torch.zeros((self.height, self.width), dtype=torch.float32))
-            else:
-                print(f"File for field {field_name} and band {band_name} not found. Skipping...")
-                bands_by_channel.append(torch.zeros((self.height, self.width), dtype=torch.float32))
-
-        stacked_bands = torch.stack(bands_by_channel, dim=2)
-        video_tensor = stacked_bands.unsqueeze(0)
-
-        yield_value = torch.tensor(self.yield_map[field_name], dtype=torch.float32)
-
-        # # ====== 추가된 출력문 ======
-        # print(f"\n--- 데이터 로딩 확인 ---")
-        # print(f"필지 코드: {field_name}")
-        # print(f"불러온 이미지 텐서 크기: {video_tensor.shape}")
-        # print(f"매핑된 수확량 값: {yield_value.item():.2f} kg")
-        # print(f"----------------------\n")
-        # # ============================
-
-        return video_tensor, yield_value
+        return image_tensor, yield_value
 
 
 # 메인 실행 블록
 if __name__ == '__main__':
     DATA_DIR = 'data'
+    TRAIN_DATA_DIR = os.path.join(DATA_DIR, 'train_data')
+    TEST_DATA_DIR = os.path.join(DATA_DIR, 'test_data')
     CSV_PATH = os.path.join(DATA_DIR, 'yield_data.csv')
 
     try:
@@ -140,24 +164,32 @@ if __name__ == '__main__':
         yield_map = dict(zip(yield_data['field_id'], yield_data['yield']))
     except FileNotFoundError:
         print(f"Error: {CSV_PATH} not found.")
-        print("Please check the file path and file name.")
+        print("Please ensure the CSV file is in the correct path.")
         exit()
 
-    field_filenames = [d for d in os.listdir(DATA_DIR) if os.path.isdir(os.path.join(DATA_DIR, d))]
-
-    if not field_filenames:
-        print(f"Error: No field directories found in {DATA_DIR}.")
+    try:
+        train_filenames = [d for d in os.listdir(TRAIN_DATA_DIR) if os.path.isdir(os.path.join(TRAIN_DATA_DIR, d))]
+        if not train_filenames:
+            print(f"Error: No field directories found in {TRAIN_DATA_DIR}.")
+            exit()
+    except FileNotFoundError:
+        print(f"Error: {TRAIN_DATA_DIR} not found. Please create this folder.")
         exit()
 
-    train_filenames, test_filenames = train_test_split(
-        field_filenames, test_size=1, random_state=42
-    )
+    try:
+        test_filenames = [d for d in os.listdir(TEST_DATA_DIR) if os.path.isdir(os.path.join(TEST_DATA_DIR, d))]
+        if not test_filenames:
+            print(f"Error: No field directories found in {TEST_DATA_DIR}.")
+            exit()
+    except FileNotFoundError:
+        print(f"Error: {TEST_DATA_DIR} not found. Please create this folder.")
+        exit()
 
     BATCH_SIZE = 1
-    train_dataset = RiceYieldDataset(DATA_DIR, train_filenames, yield_map)
+    train_dataset = RiceYieldDataset(TRAIN_DATA_DIR, train_filenames, yield_map)
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
 
-    test_dataset = RiceYieldDataset(DATA_DIR, test_filenames, yield_map)
+    test_dataset = RiceYieldDataset(TEST_DATA_DIR, test_filenames, yield_map)
     test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
     EPOCHS = 100
@@ -169,7 +201,7 @@ if __name__ == '__main__':
     criterion = nn.MSELoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
 
-    print("모델 학습 시작 (총 수확량 예측)...")
+    print("모델 학습 시작 (총 수확량 예측, 패치 기반)...")
     for epoch in range(EPOCHS):
         model.train()
         train_loss = 0.0
@@ -193,30 +225,28 @@ if __name__ == '__main__':
     print("예측 시작...")
     model.eval()
     with torch.no_grad():
-        test_predictions = []
-        test_labels = []
+        test_predictions_per_field = []
 
         for inputs, labels in test_loader:
             inputs, labels = inputs.to(device), labels.to(device)
             predicted_yield = model(inputs)
+            test_predictions_per_field.append(predicted_yield.item())
 
-            test_predictions.append(predicted_yield.item())
-            test_labels.append(labels.item())
+        test_predictions_per_field = np.array(test_predictions_per_field)
 
-        test_predictions = np.array(test_predictions)
-        test_labels = np.array(test_labels)
+        final_predicted_yield = np.mean(test_predictions_per_field)
 
-        rmse = np.sqrt(np.mean((test_predictions - test_labels) ** 2))
-        mape = np.mean(np.abs((test_labels - test_predictions) / (test_labels + 1e-8))) * 100
+        actual_yield = test_dataset.data[0]['yield']
 
-        field_name = test_filenames[0]
-        actual_yield = test_labels[0]
-        predicted_yield = test_predictions[0]
-
-        print(f"필지 코드: {field_name}")
+        print(f"테스트 필지 코드: {test_filenames[0]}")
         print(f"실제 수확량: {actual_yield:.2f} kg")
-        print(f"예측 수확량: {predicted_yield:.2f} kg")
-        print(f"예측 오차: {abs(actual_yield - predicted_yield):.2f} kg")
+        print(f"예측 수확량 (패치 평균): {final_predicted_yield:.2f} kg")
+        print(f"예측 오차: {abs(actual_yield - final_predicted_yield):.2f} kg")
+
+        test_labels = np.array([actual_yield] * len(test_predictions_per_field))
+        rmse = np.sqrt(np.mean((test_predictions_per_field - test_labels) ** 2))
+        mape = np.mean(np.abs((test_labels - test_predictions_per_field) / (test_labels + 1e-8))) * 100
+
         print(f"\n테스트 세트 RMSE: {rmse:.2f} kg")
         print(f"테스트 세트 MAPE: {mape:.2f} %")
 
