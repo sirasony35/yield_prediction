@@ -15,6 +15,7 @@ TIMESTEPS = 1
 HEIGHT = 128
 WIDTH = 128
 CHANNELS = 5
+
 NUM_ENCODER_LAYERS = 4
 NUM_HEADS = 8
 EMBED_DIM = 512
@@ -65,7 +66,7 @@ class ViViT(nn.Module):
         return x
 
 
-# 사용자 정의 데이터셋 클래스 (이미지를 여러 패치로 잘라 사용)
+# 사용자 정의 데이터셋 클래스 (이전과 동일)
 class RiceYieldDataset(Dataset):
     def __init__(self, base_dir, filenames, yield_map):
         self.base_dir = base_dir
@@ -87,7 +88,6 @@ class RiceYieldDataset(Dataset):
             image_files = [f for f in os.listdir(field_path) if f.endswith('.data.tif')]
             ordered_bands = ['Blue', 'Green', 'Red', 'Red_Edge', 'NIR']
 
-            # 모든 밴드 파일을 불러와 원본 크기 그대로 리스트에 저장
             for band_name in ordered_bands:
                 abbreviation = self.band_abbreviations[band_name]
                 found_file = next((f for f in image_files if field_name in f and abbreviation in f), None)
@@ -100,13 +100,11 @@ class RiceYieldDataset(Dataset):
                             all_bands_raw.append(torch.from_numpy(img).float())
                     except rasterio.errors.RasterioIOError:
                         print(f"Error loading {band_path}. Skipping...")
-                        # 오류 발생 시 빈 텐서 대신 None을 추가
                         all_bands_raw.append(None)
                 else:
                     print(f"File for field {field_name} and band {band_name} not found. Skipping...")
                     all_bands_raw.append(None)
 
-            # 불러온 밴드들 중 가장 작은 크기 찾기
             valid_bands = [b for b in all_bands_raw if b is not None]
             if not valid_bands:
                 print(f"No valid band data found for field {field_name}. Skipping field.")
@@ -116,19 +114,15 @@ class RiceYieldDataset(Dataset):
             min_w = min(b.shape[1] for b in valid_bands)
 
             bands_by_channel = []
-            # 모든 밴드를 가장 작은 공통 크기로 크롭하여 합치기
             for b in all_bands_raw:
                 if b is not None:
-                    # 중앙 크롭하여 크기 맞추기
                     cropped_band = F.center_crop(b.unsqueeze(0), (min_h, min_w)).squeeze(0)
                     bands_by_channel.append(cropped_band)
                 else:
-                    # 유효하지 않은 밴드는 가장 작은 크기의 0 텐서로 채움
                     bands_by_channel.append(torch.zeros((min_h, min_w), dtype=torch.float32))
 
             full_image_tensor = torch.stack(bands_by_channel, dim=2)
 
-            # 이미지를 패치로 자르기
             h, w, c = full_image_tensor.shape
             for i in range(0, h, self.patch_h):
                 for j in range(0, w, self.patch_w):
@@ -145,7 +139,9 @@ class RiceYieldDataset(Dataset):
 
     def __getitem__(self, idx):
         item = self.data[idx]
-        image_tensor = item['image'].unsqueeze(0)
+        image_tensor = item['image']
+
+        image_tensor = image_tensor.unsqueeze(0)
         yield_value = torch.tensor(item['yield'], dtype=torch.float32)
 
         return image_tensor, yield_value
@@ -186,6 +182,7 @@ if __name__ == '__main__':
         exit()
 
     BATCH_SIZE = 1
+
     train_dataset = RiceYieldDataset(TRAIN_DATA_DIR, train_filenames, yield_map)
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
 
@@ -193,34 +190,59 @@ if __name__ == '__main__':
     test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
     EPOCHS = 100
+    # === 원래의 학습률로 되돌림 ===
     LEARNING_RATE = 1e-3
     WEIGHT_DECAY = 1e-2
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # === device를 CPU로 강제 설정 ===
+    device = torch.device('cpu')
+    # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = ViViT().to(device)
     criterion = nn.MSELoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+
+    # === 학습률 스케줄러 제거 ===
+    # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=10)
 
     print("모델 학습 시작 (총 수확량 예측, 패치 기반)...")
     for epoch in range(EPOCHS):
         model.train()
         train_loss = 0.0
+        print(f"--- Epoch {epoch + 1}/{EPOCHS} 시작 ---")
         for i, (inputs, labels) in enumerate(train_loader):
             inputs, labels = inputs.to(device), labels.to(device)
             optimizer.zero_grad()
             outputs = model(inputs)
             loss = criterion(outputs.squeeze(), labels)
             loss.backward()
+
+            # === 경사 클리핑 제거 ===
+            # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
+            # === nan 감지 로직 제거 ===
+            # if not torch.isfinite(loss):
+            #     print(f"경고: 배치 [{i}/{len(train_loader)}]에서 손실이 nan 또는 inf입니다. 이 배치는 건너뜁니다.")
+            #     continue
+
             optimizer.step()
             train_loss += loss.item()
 
+            if i % 10 == 0:
+                print(f"  배치 [{i}/{len(train_loader)}], 배치 손실: {loss.item():.4f}")
+
         avg_train_loss = train_loss / len(train_loader)
 
-        if (epoch + 1) % 10 == 0:
-            print(f'Epoch [{epoch + 1}/{EPOCHS}], Train Loss: {avg_train_loss:.4f}')
+        # scheduler.step(avg_train_loss)
+
+        print(f'Epoch [{epoch + 1}/{EPOCHS}] 완료, 평균 훈련 손실: {avg_train_loss:.4f}')
+        print(f'현재 학습률: {optimizer.param_groups[0]["lr"]:.6f}')
 
     print("모델 학습 완료!")
     print("-" * 30)
+
+    model_save_path = "vivit_trained_model.pth"
+    torch.save(model.state_dict(), model_save_path)
+    print(f"모델 가중치가 '{model_save_path}'에 저장되었습니다.")
 
     print("예측 시작...")
     model.eval()
