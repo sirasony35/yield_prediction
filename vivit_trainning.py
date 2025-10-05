@@ -279,8 +279,17 @@ if __name__ == '__main__':
     )
 
     # --- 4. 모델 및 학습 구성 요소 초기화 ---
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-    print(f"--- 장치: {device} ---")
+    print("\n--- GPU 확인 ---")
+    if torch.cuda.is_available():
+        device_id = 0 # 사용할 GPU 번호 (0번 GPU 사용)
+        torch.cuda.set_device(device_id)
+        device = torch.device(f"cuda:{device_id}")
+        print(f"✅ CUDA 사용 가능. 총 {torch.cuda.device_count()}개의 GPU 발견.")
+        print(f"   -> 현재 장치: {torch.cuda.get_device_name(device)}")
+    else:
+        device = torch.device("cpu")
+        print("⚠️ 경고: CUDA를 사용할 수 없습니다. CPU로 학습을 진행합니다.")
+    print("-----------------\n")
 
     model = ViViT().to(device)
     model.apply(weights_init)
