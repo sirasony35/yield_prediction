@@ -208,29 +208,46 @@ if __name__ == '__main__':
     WEIGHT_DECAY = 1e-2
     # ---------------------------------------------------
 
+    # --- 모델, 옵티마이저, 손실 함수 정의 ---
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     print(f"--- 장치: {device} ---")
 
     model = ViViT().to(device)
-
-    # --- <<<<<<< 추가된 부분: 가중치 초기화 적용 >>>>>>> ---
     model.apply(weights_init)
     print("--- 모델 가중치 초기화 완료 ---")
-    # --------------------------------------------------
 
     best_model_path = 'best_model.pth'
+    checkpoint_path = 'checkpoint.pth'  # 체크포인트 파일 경로
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
-
     criterion = nn.MSELoss()
-    start_epoch = 0
-    best_loss = float('inf')
+
+    # 학습률 스케줄러 추가 (손실이 개선되지 않으면 학습률을 낮춤)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5, factor=0.5)
+
+    # --- <<<<<<< 체크포인트 불러오기 로직 >>>>>>> ---
+    if os.path.exists(checkpoint_path):
+        print(f"--- '{checkpoint_path}' 파일에서 체크포인트를 불러옵니다. ---")
+        checkpoint = torch.load(checkpoint_path)
+
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        start_epoch = checkpoint['epoch'] + 1
+        best_loss = checkpoint['best_loss']
+
+        print(f"  -> 학습을 재개합니다. 시작 에포크: {start_epoch}")
+    else:
+        print("--- 체크포인트 파일이 없습니다. 처음부터 학습을 시작합니다. ---")
+        start_epoch = 0
+        best_loss = float('inf')
+    # -----------------------------------------------
 
     print("=== 학습 시작 ===")
     for epoch in range(start_epoch, EPOCHS):
         model.train()
         epoch_loss = 0.0
-        # tqdm을 사용하여 학습 진행률 표시
+
         for i, (inputs, labels, _) in enumerate(tqdm(train_loader, desc=f"Epoch {epoch + 1}/{EPOCHS}")):
             inputs, labels = inputs.to(device), labels.to(device)
             optimizer.zero_grad()
@@ -242,21 +259,35 @@ if __name__ == '__main__':
                 continue
 
             loss.backward()
-            # 그래디언트 클리핑 max_norm을 0.5로 낮춰 더 안정적으로 만듭니다.
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
             optimizer.step()
             epoch_loss += loss.item()
 
         avg_loss = epoch_loss / len(train_loader) if len(train_loader) > 0 else 0
-        print(f"Epoch [{epoch + 1}/{EPOCHS}] 완료, 평균 훈련 손실: {avg_loss:.4f}")
+
+        # 스케줄러에 현재 손실 값을 알려줍니다.
+        scheduler.step(avg_loss)
+
+        print(
+            f"Epoch [{epoch + 1}/{EPOCHS}] 완료, 평균 훈련 손실: {avg_loss:.4f}, 현재 학습률: {optimizer.param_groups[0]['lr']:.6f}")
 
         if avg_loss < best_loss:
             best_loss = avg_loss
             torch.save(model.state_dict(), best_model_path)
             print(f"  -> 새로운 최적 모델 저장됨 (손실: {best_loss:.4f})")
 
-    print("=== 학습 완료 ===")
+        # --- <<<<<<< 체크포인트 저장 로직 >>>>>>> ---
+        # 매 에포크가 끝날 때마다 현재 상태를 저장합니다.
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
+            'best_loss': best_loss,
+        }, checkpoint_path)
+        # -----------------------------------------
 
+    print("=== 학습 완료 ===")
     # 평가 로직 (이전과 동일)
     print("\n=== 예측 및 평가 시작 ===")
     # ... (이하 평가 로직은 이전과 동일)
