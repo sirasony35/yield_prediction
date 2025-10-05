@@ -22,37 +22,20 @@ EMBED_DIM = 512
 MLP_DIM = 2048
 
 
-# --- ViViT 모델 클래스 (전체 정의) ---
+# --- ViViT 모델 클래스 (변경 없음) ---
 class ViViT(nn.Module):
-    def __init__(self,
-                 timesteps=TIMESTEPS,
-                 height=HEIGHT,
-                 width=WIDTH,
-                 channels=CHANNELS,
-                 patch_size=PATCH_SIZE,
-                 num_encoder_layers=NUM_ENCODER_LAYERS,
-                 num_heads=NUM_HEADS,
-                 embed_dim=EMBED_DIM,
-                 mlp_dim=MLP_DIM):
+    # ... (이전과 내용 동일)
+    def __init__(self, timesteps=TIMESTEPS, height=HEIGHT, width=WIDTH, channels=CHANNELS, patch_size=PATCH_SIZE,
+                 num_encoder_layers=NUM_ENCODER_LAYERS, num_heads=NUM_HEADS, embed_dim=EMBED_DIM, mlp_dim=MLP_DIM):
         super().__init__()
         patch_t, patch_h, patch_w = patch_size
         num_patches = (timesteps // patch_t) * (height // patch_h) * (width // patch_w)
-
-        self.tubelet_embedding = nn.Conv3d(in_channels=channels,
-                                           out_channels=embed_dim,
-                                           kernel_size=patch_size,
+        self.tubelet_embedding = nn.Conv3d(in_channels=channels, out_channels=embed_dim, kernel_size=patch_size,
                                            stride=patch_size)
-
         self.pos_embedding = nn.Parameter(torch.randn(1, num_patches, embed_dim))
-
-        encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim,
-                                                   nhead=num_heads,
-                                                   dim_feedforward=mlp_dim,
-                                                   batch_first=True,
-                                                   dropout=0.1)
-
+        encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=num_heads, dim_feedforward=mlp_dim,
+                                                   batch_first=True, dropout=0.1)
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_encoder_layers)
-
         self.fc_head = nn.Linear(embed_dim, 1)
 
     def forward(self, x):
@@ -66,41 +49,29 @@ class ViViT(nn.Module):
         return x
 
 
-# --- 사용자 정의 데이터셋 클래스 (전체 정의) ---
+# --- 사용자 정의 데이터셋 클래스 (변경 없음) ---
 class RiceYieldDataset(Dataset):
+    # ... (이전과 내용 동일)
     def __init__(self, base_dir, filenames, yield_map, is_train=True):
-        self.base_dir = base_dir
-        self.filenames = filenames
-        self.yield_map = yield_map
-        self.patch_h = PATCH_SIZE[1]
-        self.patch_w = PATCH_SIZE[2]
-        self.band_abbreviations = {
-            'Blue': 'Blue', 'Green': 'Green', 'Red': 'Red',
-            'Red_Edge': 'RE', 'NIR': 'NIR'
-        }
-
+        self.base_dir, self.filenames, self.yield_map = base_dir, filenames, yield_map
+        self.patch_h, self.patch_w = PATCH_SIZE[1], PATCH_SIZE[2]
+        self.band_abbreviations = {'Blue': 'Blue', 'Green': 'Green', 'Red': 'Red', 'Red_Edge': 'RE', 'NIR': 'NIR'}
         if is_train:
             self.means, self.stds = self._calculate_stats()
         else:
-            self.means = None
-            self.stds = None
-
+            self.means, self.stds = None, None
         print(f"--- 데이터 패치 생성 시작: {base_dir} ---")
         self.data = self._create_patches()
         print(f"--- 데이터 패치 생성 완료: 총 {len(self.data)}개 ---")
 
     def _calculate_stats(self):
         print("  > 훈련 데이터셋의 평균 및 표준편차를 계산합니다 (시간이 걸릴 수 있습니다)...")
-        count = 0
-        mean = torch.zeros(CHANNELS)
-        std = torch.zeros(CHANNELS)
-
+        count, mean, std = 0, torch.zeros(CHANNELS), torch.zeros(CHANNELS)
         for field_name in tqdm(self.filenames, desc="통계 계산 중"):
             field_path = os.path.join(self.base_dir, field_name)
             all_bands_raw = []
             image_files = [f for f in os.listdir(field_path) if f.endswith('.data.tif')]
             ordered_bands = ['Blue', 'Green', 'Red', 'Red_Edge', 'NIR']
-
             for band_name in ordered_bands:
                 abbreviation = self.band_abbreviations[band_name]
                 found_file = next((f for f in image_files if field_name in f and abbreviation in f), None)
@@ -112,38 +83,23 @@ class RiceYieldDataset(Dataset):
                         all_bands_raw.append(None)
                 else:
                     all_bands_raw.append(None)
-
             valid_bands = [b for b in all_bands_raw if b is not None]
             if not valid_bands: continue
-
-            min_h = min(b.shape[0] for b in valid_bands)
-            min_w = min(b.shape[1] for b in valid_bands)
-
+            min_h, min_w = min(b.shape[0] for b in valid_bands), min(b.shape[1] for b in valid_bands)
             bands_by_channel = []
             for b in all_bands_raw:
                 if b is not None:
                     bands_by_channel.append(F.center_crop(b.unsqueeze(0), (min_h, min_w)).squeeze(0))
                 else:
                     bands_by_channel.append(torch.zeros((min_h, min_w), dtype=torch.float32))
-
             full_image_tensor = torch.stack(bands_by_channel, dim=-1)
-
             full_image_tensor = torch.nan_to_num(full_image_tensor, nan=0.0, posinf=0.0, neginf=0.0)
-
-            mean += full_image_tensor.mean(dim=[0, 1])
-            std += full_image_tensor.std(dim=[0, 1])
+            mean += full_image_tensor.mean(dim=[0, 1]);
+            std += full_image_tensor.std(dim=[0, 1]);
             count += 1
-
-        if count == 0:
-            return torch.zeros(CHANNELS), torch.ones(CHANNELS)
-
-        final_mean = mean / count
-        final_std = std / count
-
-        print(f"  > 계산 완료!")
-        print(f"  > 계산된 평균 (Means): {final_mean.tolist()}")
-        print(f"  > 계산된 표준편차 (Stds): {final_std.tolist()}")
-
+        final_mean, final_std = (mean / count, std / count) if count > 0 else (torch.zeros(CHANNELS),
+                                                                               torch.ones(CHANNELS))
+        print(f"  > 계산 완료!\n  > 계산된 평균 (Means): {final_mean.tolist()}\n  > 계산된 표준편차 (Stds): {final_std.tolist()}")
         return final_mean, final_std
 
     def _create_patches(self):
@@ -161,12 +117,9 @@ class RiceYieldDataset(Dataset):
                         all_bands_raw.append(torch.from_numpy(src.read(1).astype(np.float32)))
                 else:
                     all_bands_raw.append(None)
-
             valid_bands = [b for b in all_bands_raw if b is not None]
             if not valid_bands: continue
-
-            min_h = min(b.shape[0] for b in valid_bands)
-            min_w = min(b.shape[1] for b in valid_bands)
+            min_h, min_w = min(b.shape[0] for b in valid_bands), min(b.shape[1] for b in valid_bands)
             bands_by_channel = []
             for b in all_bands_raw:
                 if b is not None:
@@ -174,19 +127,16 @@ class RiceYieldDataset(Dataset):
                 else:
                     bands_by_channel.append(torch.zeros((min_h, min_w), dtype=torch.float32))
             full_image_tensor = torch.stack(bands_by_channel, dim=2)
-
             h, w, _ = full_image_tensor.shape
             for i in range(0, h, self.patch_h):
                 for j in range(0, w, self.patch_w):
                     patch = full_image_tensor[i:i + self.patch_h, j:j + self.patch_w, :]
-                    if patch.shape[0] == self.patch_h and patch.shape[1] == self.patch_w:
-                        data_list.append(
-                            {'image': patch, 'yield': self.yield_map[field_name], 'field_name': field_name})
+                    if patch.shape[0] == self.patch_h and patch.shape[1] == self.patch_w: data_list.append(
+                        {'image': patch, 'yield': self.yield_map[field_name], 'field_name': field_name})
         return data_list
 
     def set_stats(self, means, stds):
-        self.means = means
-        self.stds = stds
+        self.means, self.stds = means, stds
 
     def __len__(self):
         return len(self.data)
@@ -202,16 +152,28 @@ class RiceYieldDataset(Dataset):
                     mean_val = finite_vals.mean() if finite_vals.numel() > 0 else 0
                     image_tensor[:, :, c] = torch.nan_to_num(channel_data, nan=mean_val, posinf=mean_val,
                                                              neginf=mean_val)
-
         if self.means is not None and self.stds is not None:
             stds_eps = self.stds + 1e-6
             image_tensor = (image_tensor - self.means) / stds_eps
-
         image_tensor = image_tensor.unsqueeze(0)
         yield_value = torch.tensor(item['yield'], dtype=torch.float32)
         field_name = item['field_name']
         return image_tensor, yield_value, field_name
 
+
+# --- <<<<<<< 추가된 부분: 가중치 초기화 함수 >>>>>>> ---
+def weights_init(m):
+    """Xavier 초기화를 사용하여 모델 가중치를 안정적으로 설정합니다."""
+    if isinstance(m, (nn.Linear, nn.Conv3d)):
+        torch.nn.init.xavier_uniform_(m.weight)
+        if m.bias is not None:
+            torch.nn.init.constant_(m.bias, 0)
+    elif isinstance(m, nn.LayerNorm):
+        torch.nn.init.constant_(m.bias, 0)
+        torch.nn.init.constant_(m.weight, 1.0)
+
+
+# ---------------------------------------------------
 
 # --- 메인 실행 블록 ---
 if __name__ == '__main__':
@@ -240,14 +202,22 @@ if __name__ == '__main__':
     test_dataset.set_stats(train_dataset.means, train_dataset.stds)
     test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4)
 
+    # --- <<<<<<< 수정된 부분: 하이퍼파라미터 조정 >>>>>>> ---
     EPOCHS = 100
-    LEARNING_RATE = 1e-4
+    LEARNING_RATE = 3e-5  # 학습률을 낮춤 (1e-4 -> 3e-5)
     WEIGHT_DECAY = 1e-2
+    # ---------------------------------------------------
 
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     print(f"--- 장치: {device} ---")
 
     model = ViViT().to(device)
+
+    # --- <<<<<<< 추가된 부분: 가중치 초기화 적용 >>>>>>> ---
+    model.apply(weights_init)
+    print("--- 모델 가중치 초기화 완료 ---")
+    # --------------------------------------------------
+
     best_model_path = 'best_model.pth'
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
@@ -260,6 +230,7 @@ if __name__ == '__main__':
     for epoch in range(start_epoch, EPOCHS):
         model.train()
         epoch_loss = 0.0
+        # tqdm을 사용하여 학습 진행률 표시
         for i, (inputs, labels, _) in enumerate(tqdm(train_loader, desc=f"Epoch {epoch + 1}/{EPOCHS}")):
             inputs, labels = inputs.to(device), labels.to(device)
             optimizer.zero_grad()
@@ -271,14 +242,14 @@ if __name__ == '__main__':
                 continue
 
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            # 그래디언트 클리핑 max_norm을 0.5로 낮춰 더 안정적으로 만듭니다.
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
             optimizer.step()
             epoch_loss += loss.item()
 
-        avg_loss = epoch_loss / len(train_loader)
+        avg_loss = epoch_loss / len(train_loader) if len(train_loader) > 0 else 0
         print(f"Epoch [{epoch + 1}/{EPOCHS}] 완료, 평균 훈련 손실: {avg_loss:.4f}")
 
-        # 가장 좋은 모델 저장
         if avg_loss < best_loss:
             best_loss = avg_loss
             torch.save(model.state_dict(), best_model_path)
@@ -286,6 +257,9 @@ if __name__ == '__main__':
 
     print("=== 학습 완료 ===")
 
+    # 평가 로직 (이전과 동일)
+    print("\n=== 예측 및 평가 시작 ===")
+    # ... (이하 평가 로직은 이전과 동일)
     # --- 평가 로직 시작 ---
     print("\n=== 예측 및 평가 시작 ===")
     # 저장된 최고의 모델 가중치를 불러옵니다.
