@@ -255,7 +255,7 @@ if __name__ == '__main__':
     EPOCHS = 100
     BATCH_SIZE = 16
     LEARNING_RATE = 3e-5
-    WEIGHT_DECAY = 1e-2
+    WEIGHT_DECAY = 0.05
     NUM_WORKERS = 8
 
     # --- 3. 데이터 로더 생성 ---
